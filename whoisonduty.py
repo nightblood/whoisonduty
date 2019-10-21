@@ -11,6 +11,14 @@ from openpyxl import Workbook
 import openpyxl
 from openpyxl.styles import Font, colors, Alignment
 import random
+from openpyxl.styles import PatternFill
+from openpyxl.styles import Border, Side
+from openpyxl.comments import Comment
+import json
+import urllib
+from urllib import request
+import math
+
 
 class MainWindow(QWidget):
     def __init__(self, parent=None):
@@ -29,12 +37,26 @@ class MainWindow(QWidget):
     def init_data(self):
         self.init_staff()
         self.init_date()
+        self.next_holiday = self.get_next_holiday()
+
+    def get_next_holiday(self):
+        try:
+            url = "http://timor.tech/api/holiday/tts/next"
+            resp = request.urlopen(url, data=None, timeout=5)
+            data = json.loads(resp.read())
+            if data["code"] == 0:
+                print(data["tts"])
+                return data["tts"]
+        except Exception as e:
+            print(e)
+            return ""
 
     def init_window(self):
         self.main_layout = QVBoxLayout(self)
-        self.l_desc = QLabel('将所有名字填入下方输入框，并以空格隔开。点击 排班 按钮将随机排列名字。')
+        self.l_desc = QLabel('将所有名字填入下方输入框，并以空格隔开。点击【排班】按钮将随机排列名字。')
         self.pte_staff = QPlainTextEdit(self.get_staff_str())
         self.pte_staff.setFont(QFont('Roman times', 14, QFont.Bold))
+        self.lb_holiday_desc = QLabel(self.next_holiday)
         self.l_start_dt = QLabel('开始日期')
         self.l_end_dt = QLabel('结束日期')
 
@@ -72,6 +94,7 @@ class MainWindow(QWidget):
         self.main_layout.addWidget(self.layout_start_dt)
         self.main_layout.addWidget(self.layout_end_dt)
         self.main_layout.addWidget(self.l_weeks)
+        self.main_layout.addWidget(self.lb_holiday_desc)
         self.main_layout.addWidget(self.layout_func)
 
     def set_time(self, btn_idx):
@@ -193,38 +216,103 @@ class ExportWorker(QThread):
 
             col_name = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
             first_row = ['日期', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
-            ws.row_dimensions[1].height = 30  # 行高
+            ws.row_dimensions[1].height = 40  # 行高
+            ws.row_dimensions[2].height = 30  # 行高
+
+            border = Border(left=Side(border_style='thin', color='4f5555'), right=Side(border_style='thin', color='4f5555'),
+                            top=Side(border_style='thin', color='4f5555'), bottom=Side(border_style='thin', color='4f5555'))
+            pattern_fill = PatternFill("solid", fgColor="feeeed")  # 星期行和日期列背景色
+            bg_weekend = PatternFill("solid", fgColor="fedcbd")  # 周末值班人背景色
+            bg_holidayd = PatternFill("solid", fgColor="f15b6c")  # 节假日
+            bg_holidayd_work = PatternFill("solid", fgColor="87843b")  # 节假日调休
+
+            ws.merge_cells('A1:H1')  # 合并单元格
+            ws['A1'] = "值 班 表"
+            ws["A1"].fill = PatternFill("solid", fgColor="76becc")
+            ws["A1"].border = border
+            ws["A1"].alignment = Alignment(horizontal='center', vertical='center')
+            ws["A1"].font = Font(u'宋体', size=20, bold=True, italic=False, strike=False, color='000000')
 
             for col_idx in range(len(col_name)):
-                ws[col_name[col_idx] + '1'] = first_row[col_idx]
-                ws[col_name[col_idx] + '1'].alignment = Alignment(horizontal='center', vertical='center')
+                col = col_name[col_idx]
+                cell_pos = col + "2"
+                ws[cell_pos] = first_row[col_idx]
+                ws[cell_pos].alignment = Alignment(horizontal='center', vertical='center')
+                ws[cell_pos].fill = pattern_fill
+                ws[cell_pos].border = border
                 if col_idx == 0:
-                    ws.column_dimensions[col_name[col_idx]].width = 25
+                    ws.column_dimensions[col].width = 25
                 else:
-                    ws.column_dimensions[col_name[col_idx]].width = 15
+                    ws.column_dimensions[col].width = 15
 
-            staff_idx = 0
-            row_number = self.weeks + 2
+            row_number = math.ceil(self.weeks) + 2  # +2 ：第一行为【值班表】第二行为【星期】
+            # 找到周一的日期，和对应的人
             start_time = datetime.datetime.strptime(self.start_dt, '%Y年%m月%d日')
+            delta = start_time.weekday()
+            start_time = start_time - datetime.timedelta(days=delta)
+            # 找到周一值班的人
+            staff_idx = len(self.staff) - delta
 
-            for row_idx in range(2, int(row_number)):
+            holidays = self.get_holidays(start_time, self.weeks)
+
+            for row_idx in range(3, int(row_number) + 2):  # 从第三行开始排班
                 ws.row_dimensions[row_idx].height = 30  # 行高
-                date_desc = (start_time + datetime.timedelta(weeks=row_idx - 2)).strftime('%Y{y}%m{m}%d{d}').format(
-                    y='年', m='月', d='日')
+                date_desc = (start_time + datetime.timedelta(weeks=row_idx - 3)).strftime('%Y{y}%m{m}%d{d}').format(
+                    y='年', m='月', d='日') + "-" + (start_time + datetime.timedelta(weeks=row_idx - 3, days=6)).strftime('%m{m}%d{d}').format(
+                   m='月', d='日')
                 for col_idx in range(len(col_name)):
+                    cell_pos = col_name[col_idx] + str(row_idx)
+                    bg_cell = None
                     if col_idx == 0:
-                        ws[col_name[col_idx] + str(row_idx)] = date_desc
+                        ws[cell_pos] = date_desc
+                        ws[cell_pos].fill = pattern_fill
                     else:
-                        ws[col_name[col_idx] + str(row_idx)] = self.staff[staff_idx]
+                        ws[cell_pos] = self.staff[staff_idx]
                         staff_idx = (staff_idx + 1) % len(self.staff)
-                    ws[col_name[col_idx] + str(row_idx)].alignment = Alignment(horizontal='center', vertical='center')
+                        date_item = (start_time + datetime.timedelta(weeks=row_idx - 3, days=col_idx - 1)).strftime(
+                            '%Y{y}%m{m}%d{d}').format(y='-', m='-', d='')
+                        comment = date_item
+                        if col_idx in (6, 7):
+                            bg_cell = bg_weekend
+                        if holidays is not None and holidays.__contains__(date_item) and holidays[date_item] is not None and holidays[date_item]["holiday"] is not None:
+                            if holidays[date_item]["holiday"]:
+                                bg_cell = bg_holidayd
+                            else:
+                                bg_cell = bg_holidayd_work
+                            comment = holidays[date_item]["name"] + "\n" + holidays[date_item]["date"]
+
+                        ws[cell_pos].comment = Comment(comment, 'zlf')
+                    if bg_cell is not None:
+                        ws[cell_pos].fill = bg_cell
+                    ws[cell_pos].alignment = Alignment(horizontal='center', vertical='center')
+                    ws[cell_pos].border = border
             file = '值班表' + self.start_dt + '.xlsx'
             wb.save(file)
             self.update_staff_file()
-            self.sig_complete.emit('已导出值班表 ' + file)
+            self.sig_complete.emit('已在当前目录下导出值班表 ' + file)
         except Exception as e:
             print(e)
+            print(e.__traceback__.tb_lineno)
+
             self.sig_complete.emit('异常：' + str(e))
+
+    def get_holidays(self, start_time, weeks):
+        try:
+            items = start_time.strftime('%Y-%m-%d')
+
+            for i in range(int(weeks * 7) + 1):
+                items = items + "," + (start_time + datetime.timedelta(days=i)).strftime('%Y{y}%m{m}%d{d}').format(y='-', m='-', d='')
+            print(items)
+
+            url = "http://timor.tech/api/holiday/batch?d=" + items
+            resp = request.urlopen(url, data=None, timeout=5)
+            data = json.loads(resp.read())
+            if data["code"] == 0:
+                print(data["holiday"])
+                return data["holiday"]
+        except Exception as e:
+            print(e)
+            print(e.__traceback__.tb_lineno)
 
     def update_staff_file(self):
         try:
