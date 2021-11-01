@@ -8,23 +8,24 @@ from PyQt5.QtWidgets import *
 from functools import reduce
 import datetime
 from openpyxl import Workbook
-import openpyxl
-from openpyxl.styles import Font, colors, Alignment
 import random
-from openpyxl.styles import PatternFill
-from openpyxl.styles import Border, Side
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
 from openpyxl.comments import Comment
 import json
-import urllib
 from urllib import request
 import math
+import qdarkstyle
+from logzero import logger
+
+from mask_layout import MaskWidget
+from staff import StaffList
 
 
 class MainWindow(QWidget):
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
         MainWindow.setFixedSize(self, 760, 500)
-        self.setWindowTitle('自动排班工具')
+        self.setWindowTitle('排班工具')
         self.setGeometry(500, 300, 300, 200)
 
         self.export_worker = ''
@@ -40,6 +41,10 @@ class MainWindow(QWidget):
         self.next_holiday = self.get_next_holiday()
 
     def get_next_holiday(self):
+        '''
+        response：{"code":0,"tts":"最近的一个节日是2022-01-01的元旦，还有61天。"}
+        :return:
+        '''
         try:
             url = "http://timor.tech/api/holiday/tts/next"
             resp = request.urlopen(url, data=None, timeout=5)
@@ -48,7 +53,7 @@ class MainWindow(QWidget):
                 print(data["tts"])
                 return data["tts"]
         except Exception as e:
-            print(e)
+            logger.error(e)
             return ""
 
     def init_window(self):
@@ -86,11 +91,15 @@ class MainWindow(QWidget):
         self.layout_end_dt.addWidget(self.dte_end)
 
         self.btn_export.clicked.connect(self.on_export)
-
         self.btn_sort.clicked.connect(self.on_sort)
+
+        self.layout_miss = QSplitter(Qt.Horizontal)
+        self.r_btn_miss = QRadioButton("是否需要轮空计算")
+        self.layout_miss.addWidget(self.r_btn_miss)
 
         self.main_layout.addWidget(self.l_desc)
         self.main_layout.addWidget(self.pte_staff)
+        self.main_layout.addWidget(self.layout_miss)
         self.main_layout.addWidget(self.layout_start_dt)
         self.main_layout.addWidget(self.layout_end_dt)
         self.main_layout.addWidget(self.l_weeks)
@@ -114,15 +123,31 @@ class MainWindow(QWidget):
         if weeks <= 0:
             QMessageBox.question(self, '提示', '日期选择异常，请重新选择日期', QMessageBox.Yes)
             return
-        self.export_worker = ExportWorker(self.staff, weeks, self.start_dt)
+        self.export_worker = ExportWorker(self.staff, weeks, self.start_dt, self.r_btn_miss.isChecked())
+        self.export_worker.started.connect(self.show_mask)
         self.export_worker.sig_complete.connect(self.export_complete)
+        self.export_worker.finished.connect(self.hide_mask)
         self.export_worker.start()
+
+    def show_mask(self, msg="初始化中。。。"):
+        """
+        显示遮罩层，遮罩层可以显示信息msg
+        :param msg:
+        :return:
+        """
+        self.mask = MaskWidget(self)
+        self.mask.show()
+        self.mask.set_msg("制作中。。。")
+
+    def hide_mask(self):
+        if self.mask is not None and self.mask != "":
+            self.mask.close()
 
     def export_complete(self, desc):
         try:
             QMessageBox.question(self, '提示', desc, QMessageBox.Yes)
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     def get_delta_weeks(self):
         start = datetime.datetime.strptime(self.start_dt, '%Y年%m月%d日')
@@ -156,7 +181,7 @@ class MainWindow(QWidget):
                         self.staff.append(item)
             staff_file.close()
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     def init_date(self):
         now = datetime.datetime.now()
@@ -203,9 +228,10 @@ class SortWorker(QThread):
 class ExportWorker(QThread):
     sig_complete = pyqtSignal(str)
 
-    def __init__(self, staffs, weeks, start_dt):
+    def __init__(self, staffs, weeks, start_dt, miss_flag):
         super().__init__()
-        self.staff = staffs
+
+        self.staff = StaffList(staffs, miss_flag)
         self.weeks = weeks
         self.start_dt = start_dt
 
@@ -213,53 +239,37 @@ class ExportWorker(QThread):
         try:
             wb = Workbook()
             ws = wb.active
-
-            col_name = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
-            first_row = ['日期', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
-            ws.row_dimensions[1].height = 40  # 行高
-            ws.row_dimensions[2].height = 30  # 行高
-
             border = Border(left=Side(border_style='thin', color='4f5555'), right=Side(border_style='thin', color='4f5555'),
                             top=Side(border_style='thin', color='4f5555'), bottom=Side(border_style='thin', color='4f5555'))
             pattern_fill = PatternFill("solid", fgColor="feeeed")  # 星期行和日期列背景色
             bg_weekend = PatternFill("solid", fgColor="fedcbd")  # 周末值班人背景色
             bg_holidayd = PatternFill("solid", fgColor="f15b6c")  # 节假日
             bg_holidayd_work = PatternFill("solid", fgColor="87843b")  # 节假日调休
+            col_name = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
 
-            ws.merge_cells('A1:H1')  # 合并单元格
-            ws['A1'] = "值 班 表"
-            ws["A1"].fill = PatternFill("solid", fgColor="76becc")
-            ws["A1"].border = border
-            ws["A1"].alignment = Alignment(horizontal='center', vertical='center')
-            ws["A1"].font = Font(u'宋体', size=20, bold=True, italic=False, strike=False, color='000000')
+            self.init_excel(ws)  # 表头
 
-            for col_idx in range(len(col_name)):
-                col = col_name[col_idx]
-                cell_pos = col + "2"
-                ws[cell_pos] = first_row[col_idx]
-                ws[cell_pos].alignment = Alignment(horizontal='center', vertical='center')
-                ws[cell_pos].fill = pattern_fill
-                ws[cell_pos].border = border
-                if col_idx == 0:
-                    ws.column_dimensions[col].width = 25
-                else:
-                    ws.column_dimensions[col].width = 15
-
-            row_number = math.ceil(self.weeks) + 2  # +2 ：第一行为【值班表】第二行为【星期】
+            # 第一行为【值班表】第二行为【星期】， 从第三行开始排班
+            rol_start_idx = 3
+            # 计算总行数
+            row_number = math.ceil(self.weeks) + rol_start_idx - 1
             # 找到周一的日期，和对应的人
             start_time = datetime.datetime.strptime(self.start_dt, '%Y年%m月%d日')
             delta = start_time.weekday()
             start_time = start_time - datetime.timedelta(days=delta)
-            # 找到周一值班的人
-            staff_idx = len(self.staff) - delta
+            # 找到周一值班的人，
+            # staff_idx = self.staff.cnt_staff - delta
 
             holidays = self.get_holidays(start_time, self.weeks)
 
-            for row_idx in range(3, int(row_number) + 2):  # 从第三行开始排班
+            for row_idx in range(rol_start_idx, int(row_number) + rol_start_idx - 1):  # 从第三行开始排班 [3, 4, 5...]
                 ws.row_dimensions[row_idx].height = 30  # 行高
-                date_desc = (start_time + datetime.timedelta(weeks=row_idx - 3)).strftime('%Y{y}%m{m}%d{d}').format(
-                    y='年', m='月', d='日') + "-" + (start_time + datetime.timedelta(weeks=row_idx - 3, days=6)).strftime('%m{m}%d{d}').format(
-                   m='月', d='日')
+                # 每个单元格批注
+                date_desc = (start_time + datetime.timedelta(weeks=row_idx - rol_start_idx)).strftime('%Y{y}%m{m}%d{d}')\
+                    .format(y='年', m='月', d='日') + "-" \
+                    + (start_time + datetime.timedelta(weeks=row_idx - rol_start_idx, days=6))\
+                    .strftime('%m{m}%d{d}').format(m='月', d='日')
+
                 for col_idx in range(len(col_name)):
                     cell_pos = col_name[col_idx] + str(row_idx)
                     bg_cell = None
@@ -267,14 +277,23 @@ class ExportWorker(QThread):
                         ws[cell_pos] = date_desc
                         ws[cell_pos].fill = pattern_fill
                     else:
-                        ws[cell_pos] = self.staff[staff_idx]
-                        staff_idx = (staff_idx + 1) % len(self.staff)
+                        if col_idx <= delta and row_idx == rol_start_idx:
+                            ws[cell_pos] = ""  # 第三行第一个人前面表格为空（不排班）只排指定日期开始之后的
+                            logger.debug("还没开始。。。")
+                        else:
+                            staff = self.staff.get_staff_avilable()
+                            ws[cell_pos] = staff
+
                         date_item = (start_time + datetime.timedelta(weeks=row_idx - 3, days=col_idx - 1)).strftime(
                             '%Y{y}%m{m}%d{d}').format(y='-', m='-', d='')
                         comment = date_item
                         if col_idx in (6, 7):
                             bg_cell = bg_weekend
-                        if holidays is not None and holidays.__contains__(date_item) and holidays[date_item] is not None and holidays[date_item]["holiday"] is not None:
+
+                        # 添加节假日批注
+                        if holidays is not None and holidays.__contains__(date_item) \
+                                and holidays[date_item] is not None \
+                                and holidays[date_item]["holiday"] is not None:
                             if holidays[date_item]["holiday"]:
                                 bg_cell = bg_holidayd
                             else:
@@ -291,10 +310,37 @@ class ExportWorker(QThread):
             self.update_staff_file()
             self.sig_complete.emit('已在当前目录下导出值班表 ' + file)
         except Exception as e:
-            print(e)
-            print(e.__traceback__.tb_lineno)
-
+            logger.error(e)
             self.sig_complete.emit('异常：' + str(e))
+
+    def init_excel(self, ws):
+        ws.row_dimensions[1].height = 40  # 第一行行高
+        ws.row_dimensions[2].height = 30  # 第二行行高
+        ws.merge_cells('A1:H1')  # 合并单元格
+        ws['A1'] = "值 班 表"
+        ws["A1"].fill = PatternFill("solid", fgColor="76becc")
+        ws["A1"].border = Border(left=Side(border_style='thin', color='4f5555'), right=Side(border_style='thin', color='4f5555'),
+                                 top=Side(border_style='thin', color='4f5555'), bottom=Side(border_style='thin', color='4f5555'))
+        ws["A1"].alignment = Alignment(horizontal='center', vertical='center')
+        ws["A1"].font = Font(u'宋体', size=20, bold=True, italic=False, strike=False, color='000000')
+
+        col_name = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+        first_row = ['日期', '周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+
+        # 初始化星期行
+        for col_idx in range(len(col_name)):
+            col = col_name[col_idx]
+            cell_pos = col + "2"
+            ws[cell_pos] = first_row[col_idx]
+            ws[cell_pos].alignment = Alignment(horizontal='center', vertical='center')
+            ws[cell_pos].fill = PatternFill("solid", fgColor="feeeed")
+            ws[cell_pos].border = Border(left=Side(border_style='thin', color='4f5555'), right=Side(border_style='thin', color='4f5555'),
+                                         top=Side(border_style='thin', color='4f5555'), bottom=Side(border_style='thin', color='4f5555'))
+            if col_idx == 0:
+                ws.column_dimensions[col].width = 25
+            else:
+                ws.column_dimensions[col].width = 15
 
     def get_holidays(self, start_time, weeks):
         try:
@@ -311,21 +357,22 @@ class ExportWorker(QThread):
                 print(data["holiday"])
                 return data["holiday"]
         except Exception as e:
-            print(e)
-            print(e.__traceback__.tb_lineno)
+            logger.error(e)
 
     def update_staff_file(self):
         try:
             staff_file = open('staff.txt', 'w', encoding='utf-8')
-            staff_file.write(reduce(lambda x, y: x + ' ' + y, self.staff))
+            staff_file.write(reduce(lambda x, y: x + ' ' + y, self.staff.names))
             staff_file.close()
         except Exception as e:
-            print(e)
+            logger.error(e)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
+
+    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
 
     icon = QIcon()
     icon.addPixmap(QPixmap('icon.ico'), QIcon.Normal, QIcon.Off)
